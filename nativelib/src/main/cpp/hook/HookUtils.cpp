@@ -409,7 +409,7 @@ MapItemInfo getSoBaseAddress(const char *libpath, const char *name) {
 
     char *line = nullptr;
     while (getline(&line, &len, fp) != -1) {
-        if (line != nullptr && strstr(line,"r-xp")) {
+        if (line != nullptr && strstr(line,"r") && strstr(line,"x")) {
             sscanf(line, "%lx-%lx", &start, &end);
             if(memcmp((void*)start,header,HEADSIZE) == 0)
             {
