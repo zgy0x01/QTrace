@@ -5,7 +5,7 @@ function hookLoadLibrary () {
       this.soname = args[0].readCString()
       this.find = false
       //console.log("dlopen:" + this.soname)
-      if(this.soname.indexOf("libtiny") != -1)
+      if(this.soname.indexOf("chinese") != -1)
       {
         this.find = true
       }
@@ -24,7 +24,7 @@ function hookLoadLibrary () {
       this.soname = args[0].readCString()
       this.find = false
       //console.log("android_dlopen_ext:" + this.soname)
-        if(this.soname.indexOf("libtiny") != -1)
+        if(this.soname.indexOf("chinese") != -1)
         {
           this.find = true
         }

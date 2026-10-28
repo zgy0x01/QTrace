@@ -136,70 +136,171 @@ static void save_regs(size_t* regs)
     regs[30] = get_current_x30();
 }
 
-size_t trace(size_t regs[31])
+extern "C" size_t do_qbdi_trace(size_t regs[31], size_t caller_sp)
 {
     size_t function_address = _g_trace_data->start + _g_trace_data->target;
-    LOGE("start trace:%p",(void*)function_address);
+    LOGE("start trace:%p", (void*)function_address);
     shadowhook_unhook(_g_trace_data->hooktask);
+
     struct timeval start, end;
     gettimeofday(&start, nullptr);
+
     vm* vm_ = new vm();
-    auto qvm = vm_->init(_g_trace_data->start,_g_trace_data->end);
+    auto qvm = vm_->init(_g_trace_data->start, _g_trace_data->end);
     auto qbdi_state = qvm.getGPRState();
     initLogger(function_address);
     vm_->base = _g_trace_data->base;
-    sync_regs(regs,function_address,qbdi_state);
-    //在当前栈上开辟栈，不使用allocateVirtualStack，防止libart中Thread crash
-    size_t sp = get_current_sp();
-    size_t stack_size = 0x4000;
-    QBDI_GPR_SET(qbdi_state, QBDI::REG_SP, sp - stack_size);
-    QBDI_GPR_SET(qbdi_state, QBDI::REG_BP, QBDI_GPR_GET(qbdi_state, QBDI::REG_SP));
+
+    // 同步 x0 - x30 寄存器
+    sync_regs(regs, function_address, qbdi_state);
+
+    // 在当前栈上开辟空间给 QBDI 使用
+    size_t current_sp = get_current_sp();
+    size_t stack_size = 0x8000; // 稍微给大一点更安全
+    // 确保 16 字节对齐 (ARM64 强要求 SP 16字节对齐)
+    size_t new_sp = (current_sp - stack_size) & ~0xFUL;
+
+    // 【核心修复】：将调用者原始栈上的参数拷贝到 QBDI 的新栈顶
+    // 拷贝 256 字节（足够支持 8 + 32 = 40 个参数）
+    size_t copy_size = 256;
+    memcpy((void*)new_sp, (void*)caller_sp, copy_size);
+
+    // 设置 QBDI 的 SP
+    QBDI_GPR_SET(qbdi_state, QBDI::REG_SP, new_sp);
+    // 注意：不要把 BP(x29) 设为 SP！x29 应该保持调用者的 Frame Pointer，sync_regs 已经同步过了
+    // QBDI_GPR_SET(qbdi_state, QBDI::REG_BP, ...); // <--- 删掉原来这行
+
     QBDI::rword qbdi_retval;
     LOGE("trace begin");
+    // qvm.call 会自动管理返回机制，并保持此时的 REG_SP 不变，刚好对准我们 memcpy 的参数
     bool qbdi_success = qvm.call(&qbdi_retval, (uint64_t)function_address);
     LOGE("trace end");
+
     flushPending(qbdi_state);
     if (qbdi_success) {
         writelog();
-        LOGE("trace completed successfully %s",_logger->logfile.c_str());
+        LOGE("trace completed successfully %s", _logger->logfile.c_str());
     } else {
         LOGE("trace failed");
     }
+
     gettimeofday(&end, nullptr);
-    long elapsed_sec;
-    elapsed_sec = (end.tv_sec - start.tv_sec) +
-                  (end.tv_usec - start.tv_usec) / 1000000;
-    LOGI("trace time cost:%lds",elapsed_sec);
+    long elapsed_sec = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000;
+    LOGI("trace time cost:%lds", elapsed_sec);
+
     deleteLogger();
     delete vm_;
+
+    // 重新加上 hook
+    _g_trace_data->hooktask = shadowhook_hook_func_addr(
+            (void*)(_g_trace_data->start + _g_trace_data->target),
+            (void*)(hook_and_trace_arg8),
+            (void**)&ori_arg8);
+
     return qbdi_retval;
 }
-
-size_t hook_and_trace_arg8(size_t x0,size_t x1,size_t x2,size_t x3,size_t x4,size_t x5,size_t x6,size_t x7)
+extern "C" void* check_filter(size_t* regs, size_t caller_sp)
 {
-    size_t regs[31] = {0};
-    save_regs(regs);
-    regs[0] = x0;
-    regs[1] = x1;
-    regs[2] = x2;
-    regs[3] = x3;
-    regs[4] = x4;
-    regs[5] = x5;
-    regs[6] = x6;
-    regs[7] = x7;
-    //根据参数过滤条件
-    /*if(x0 == 1)
+    // 获取前 8 个参数
+    size_t x0 = regs[0];
+    size_t x1 = regs[1];
+    size_t x2 = regs[2];
+    size_t* stack_args = (size_t*)caller_sp;
+    size_t arg9  = stack_args[0]; // 第 9 个参数
+    size_t arg10 = stack_args[1]; // 第 10 个参数
+
+    // ================= 编写你的过滤条件 =================
+    // 例如：当 x0 == 1 时，不进行 trace，直接走原函数
+    if (x0 == 1)
     {
-        return ori_arg8(x0,x1,x2,x3,x4,x5,x6,x7);
+        // 返回原函数的地址（告诉汇编直接跳过去执行原函数）
+       // return (void*)ori_arg8;
+        return nullptr;
     }
-    else
-    {*/
-        size_t result = trace(regs);
-        _g_trace_data->hooktask = shadowhook_hook_func_addr((void*)(_g_trace_data->start + _g_trace_data->target),
-                                                            (void*)(hook_and_trace_arg8),
-                                                            (void**)&ori_arg8);
-        return result;
-    //}
+    // 例如：如果你想过滤某个字符串参数 (假设 x1 是 char*)
+    // if (x1 != 0 && strstr((const char*)x1, "target_str") == nullptr) {
+    //     return (void*)ori_arg8;
+    // }
+    // ===================================================
+    // 返回 nullptr (0) 表示通过过滤，需要执行 QBDI Trace！
+    return nullptr;
+}
+
+extern "C" __attribute__((naked)) size_t hook_and_trace_arg8()
+{
+    __asm__ __volatile__(
+            "mov x16, sp\n"
+            "sub sp, sp, #256\n"
+
+            // 保存所有寄存器 x0 - x30
+            "stp x0, x1, [sp, #0]\n"
+            "stp x2, x3, [sp, #16]\n"
+            "stp x4, x5, [sp, #32]\n"
+            "stp x6, x7, [sp, #48]\n"
+            "stp x8, x9, [sp, #64]\n"
+            "stp x10, x11, [sp, #80]\n"
+            "stp x12, x13, [sp, #96]\n"
+            "stp x14, x15, [sp, #112]\n"
+            "stp x16, x17, [sp, #128]\n"
+            "stp x18, x19, [sp, #144]\n"
+            "stp x20, x21, [sp, #160]\n"
+            "stp x22, x23, [sp, #176]\n"
+            "stp x24, x25, [sp, #192]\n"
+            "stp x26, x27, [sp, #208]\n"
+            "stp x28, x29, [sp, #224]\n"
+            "str x30, [sp, #240]\n"
+
+            // 第一步：调用 check_filter(regs, caller_sp) 检查是否需要过滤
+            "mov x0, sp\n"
+            "mov x1, x16\n"
+            "bl check_filter\n"
+
+            // 如果 check_filter 返回非 0 (即返回了 ori_arg8 的地址)，则跳转到 1f 标签直接执行原函数
+            "cbnz x0, 1f\n"
+
+            // ---------------- 走 QBDI Trace 分支 ----------------
+            "mov x0, sp\n"
+            "ldr x1, [sp, #128]\n"   // 从栈上重新取出之前保存的 x16 (即 caller_sp)
+            "bl do_qbdi_trace\n"     // 执行 trace
+
+            // 恢复 callee-saved 寄存器并返回给调用者
+            "ldp x18, x19, [sp, #144]\n"
+            "ldp x20, x21, [sp, #160]\n"
+            "ldp x22, x23, [sp, #176]\n"
+            "ldp x24, x25, [sp, #192]\n"
+            "ldp x26, x27, [sp, #208]\n"
+            "ldp x28, x29, [sp, #224]\n"
+            "ldr x30, [sp, #240]\n"
+            "add sp, sp, #256\n"
+            "ret\n"
+
+            // ---------------- 走原函数 (跳过 Trace) 分支 ----------------
+            "1:\n"
+            "mov x17, x0\n"          // 把原函数地址 (ori_arg8) 暂存到 x17 (IP1 临时寄存器)
+
+            // 100% 恢复进入函数时的所有参数寄存器 (x0-x15) 和上下文寄存器 (x18-x30)
+            "ldp x0, x1, [sp, #0]\n"
+            "ldp x2, x3, [sp, #16]\n"
+            "ldp x4, x5, [sp, #32]\n"
+            "ldp x6, x7, [sp, #48]\n"
+            "ldp x8, x9, [sp, #64]\n"
+            "ldp x10, x11, [sp, #80]\n"
+            "ldp x12, x13, [sp, #96]\n"
+            "ldp x14, x15, [sp, #112]\n"
+            "ldp x18, x19, [sp, #144]\n"
+            "ldp x20, x21, [sp, #160]\n"
+            "ldp x22, x23, [sp, #176]\n"
+            "ldp x24, x25, [sp, #192]\n"
+            "ldp x26, x27, [sp, #208]\n"
+            "ldp x28, x29, [sp, #224]\n"
+            "ldr x30, [sp, #240]\n"
+
+            // 恢复原始的 sp！此时栈顶又重新精确地指向第 9 个参数！
+            "add sp, sp, #256\n"
+
+            // 直接尾调用跳入原函数 ori_arg8！原函数执行完后会直接 ret 回最外层的调用者
+            "br x17\n"
+            );
 }
 
 bool checkAndCallHook(QBDI::VM *vm, QBDI::GPRState *gprState,size_t addr,size_t lastaddr)

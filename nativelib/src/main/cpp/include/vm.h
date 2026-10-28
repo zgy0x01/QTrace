@@ -45,6 +45,8 @@ void sync_regs(size_t* regs,size_t pc,QBDI::GPRState* qbdi_state);
 
 typedef size_t (*func_arg_8)(size_t x0,size_t x1,size_t x2,size_t x3,size_t x4,size_t x5,size_t x6,size_t x7);
 extern func_arg_8 ori_arg8;
-size_t hook_and_trace_arg8(size_t x0,size_t x1,size_t x2,size_t x3,size_t x4,size_t x5,size_t x6,size_t x7);
-
+//size_t hook_and_trace_arg8(size_t x0,size_t x1,size_t x2,size_t x3,size_t x4,size_t x5,size_t x6,size_t x7);
+extern "C" size_t hook_and_trace_arg8();
+extern "C" size_t do_qbdi_trace(size_t regs[31], size_t caller_sp);
+extern "C" void* check_filter(size_t* regs, size_t caller_sp);
 #endif //QBDIRECORDER_VM_H

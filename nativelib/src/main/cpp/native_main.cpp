@@ -15,7 +15,7 @@ using namespace std;
 
 static void addHooks()
 {
-    addHook(0x71DD54,hook_0x71DD54);
+   // addHook(0x71DD54,hook_0x71DD54);
 }
 
 static void addLibctrace()
@@ -78,12 +78,12 @@ size_t trace_func = 0;
 
 void config()
 {
-    libname = "libtiny.so";
+    libname = "libchinese_wall.so";
 
     string localdir(libdir);
     libpath = localdir + libname;
 
-    trace_func = 0x173148;
+    trace_func = 0x2EB24;
 
     //trace buffer 累计多少字节往本地写一次。设置为0表示每trace一条指令就写入本地
     setBufferSize(0x10000000);//每16M写一次

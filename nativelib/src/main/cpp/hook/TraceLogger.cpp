@@ -131,43 +131,72 @@ bool getFormattedTimestamp(char* buffer, size_t buffer_size) {
 }
 
 bool ensureLogDirectory(const std::string& log_dir) {
-
     struct stat st = {0};
-    if (stat(log_dir.c_str(), &st) == -1) {
-        LOGI("Directory does not exist, creating: %s", log_dir.c_str());
+    if (stat(log_dir.c_str(), &st) == 0) {
+        return true; // 目录已存在，直接返回成功
+    }
 
-        // 递归创建父目录
-        std::string parent_dir = log_dir;
-        if (parent_dir.back() == '/') {
-            parent_dir.pop_back();
-        }
+    LOGI("Directory does not exist, creating: %s", log_dir.c_str());
 
-        size_t pos = parent_dir.find_last_of('/');
-        if (pos != std::string::npos && pos > 0) {
-            std::string parent = parent_dir.substr(0, pos);
-            if (!ensureLogDirectory(parent + "/")) {
-                return false;
-            }
-        }
+    // 递归创建父目录
+    std::string parent_dir = log_dir;
+    if (parent_dir.back() == '/') {
+        parent_dir.pop_back();
+    }
 
-        if (mkdir(log_dir.c_str(), 0755) != 0) {
-            LOGE("Failed to create log directory: %s, errno: %d", log_dir.c_str(), errno);
+    size_t pos = parent_dir.find_last_of('/');
+    if (pos != std::string::npos && pos > 0) {
+        std::string parent = parent_dir.substr(0, pos);
+        if (!ensureLogDirectory(parent + "/")) {
             return false;
         }
-        LOGI("Directory created successfully: %s", log_dir.c_str());
     }
+
+    // 尝试创建目录，忽略 EEXIST（防止多线程同时创建时报错）
+    if (mkdir(log_dir.c_str(), 0777) != 0 && errno != EEXIST) {
+        LOGE("Failed to create log directory: %s, errno: %d", log_dir.c_str(), errno);
+        return false;
+    }
+    LOGI("Directory created successfully: %s", log_dir.c_str());
     return true;
 }
 
-std::string getLogPath(LogType type,void* address)
+std::string getLogPath(LogType type, void* address)
 {
     std::string private_path = getPrivatePath();
-
-    // 创建trace_logs目录
     std::string trace_logs_dir = private_path + "trace_logs/";
+
+    // 尝试首选路径 (/storage/emulated/0/Android/data/<pkg>/files/trace_logs/)
     if (!ensureLogDirectory(trace_logs_dir)) {
-        LOGE("Failed to ensure trace_logs directory: %s", trace_logs_dir.c_str());
-        return "";
+        LOGE("Primary path failed, trying fallback to internal /data/data/ directory...");
+
+        bool fallback_success = false;
+        char* app_name = getAppName();
+
+        // 降级方案 1：使用 /data/data/<包名>/files/trace_logs/ (App 100% 有权限)
+        if (app_name && strlen(app_name) > 0) {
+            // 清理包名后面可能带有的进程名后缀 (比如 com.xxx: remote)
+            std::string pkg_name(app_name);
+            size_t colon_pos = pkg_name.find(':');
+            if (colon_pos != std::string::npos) {
+                pkg_name = pkg_name.substr(0, colon_pos);
+            }
+
+            trace_logs_dir = "/data/data/" + pkg_name + "/files/trace_logs/";
+            if (ensureLogDirectory(trace_logs_dir)) {
+                fallback_success = true;
+            }
+        }
+
+        // 降级方案 2：如果连包名都获取异常，直接用 /data/user/0/<pkg> 或 /data/local/tmp/ (兜底)
+        if (!fallback_success) {
+            trace_logs_dir = "/data/local/tmp/trace_logs/";
+            if (!ensureLogDirectory(trace_logs_dir)) {
+                LOGE("All fallback log directories failed!");
+                return "";
+            }
+        }
+        LOGI("Successfully fallback to directory: %s", trace_logs_dir.c_str());
     }
 
     // 获取时间戳
