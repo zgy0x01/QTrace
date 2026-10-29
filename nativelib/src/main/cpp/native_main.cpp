@@ -83,7 +83,7 @@ void config()
     string localdir(libdir);
     libpath = localdir + libname;
 
-    trace_func = 0x2EB24;
+    trace_func = 0x3513C;
 
     //trace buffer 累计多少字节往本地写一次。设置为0表示每trace一条指令就写入本地
     setBufferSize(0x10000000);//每16M写一次

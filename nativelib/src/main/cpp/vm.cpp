@@ -135,8 +135,78 @@ static void save_regs(size_t* regs)
     regs[29] = get_current_x29();
     regs[30] = get_current_x30();
 }
-
 extern "C" size_t do_qbdi_trace(size_t regs[31], size_t caller_sp)
+{
+    size_t function_address = _g_trace_data->start + _g_trace_data->target;
+    LOGE("start trace:%p", (void*)function_address);
+    shadowhook_unhook(_g_trace_data->hooktask);
+
+    struct timeval start, end;
+    gettimeofday(&start, nullptr);
+
+    vm* vm_ = new vm();
+    auto qvm = vm_->init(_g_trace_data->start, _g_trace_data->end);
+    auto qbdi_state = qvm.getGPRState();
+    initLogger(function_address);
+    vm_->base = _g_trace_data->base;
+
+    // 1. 同步 x0 - x30 寄存器
+    sync_regs(regs, function_address, qbdi_state);
+
+    // 2. 【核心修复】：使用 alloca 在当前线程的【真实栈】上安全地开辟空间！
+    // Android pthread 默认栈大小通常是 1MB，这里分配 128KB (0x20000) 既够用又不会撑爆真实栈
+    size_t stack_size = 0x20000;
+    uint8_t* stack_buffer = (uint8_t*)alloca(stack_size);
+
+    // 栈是向低地址生长的，所以我们要把 QBDI 的栈顶设在这块内存的最高地址处。
+    // 预留 256 字节用来放栈参数，并严格保证 16 字节对齐
+    size_t copy_size = 256;
+    size_t new_sp = ((size_t)stack_buffer + stack_size - copy_size) & ~0xFUL;
+
+    // 将原始调用者的栈参数拷贝到受保护的新栈顶
+    memcpy((void*)new_sp, (void*)caller_sp, copy_size);
+
+    // 设置 QBDI 的 SP
+    QBDI_GPR_SET(qbdi_state, QBDI::REG_SP, new_sp);
+
+    // 3. 设置伪造的返回地址 (LR / x30)，用于让 qvm.run 知道何时停止
+    size_t stop_addr = 0xdeadbeefdeadbeefULL;
+    QBDI_GPR_SET(qbdi_state, QBDI::REG_LR, stop_addr);
+
+    LOGE("trace begin");
+    // 4. 必须使用 qvm.run！不要用 qvm.call（call 会重置 SP 和参数寄存器）
+    bool qbdi_success = qvm.run((uint64_t)function_address, (uint64_t)stop_addr);
+    LOGE("trace end");
+
+    // 5. 手动从 x0 获取函数返回值
+    QBDI::rword qbdi_retval = QBDI_GPR_GET(qbdi_state, 0);
+
+    flushPending(qbdi_state);
+    if (qbdi_success) {
+        writelog();
+        LOGE("trace completed successfully %s", _logger->logfile.c_str());
+    } else {
+        LOGE("trace failed");
+    }
+
+    // 注意：alloca 分配的内存随函数返回自动释放，不需要也不可以 free()！
+
+    gettimeofday(&end, nullptr);
+    long elapsed_sec = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000;
+    LOGI("trace time cost:%lds", elapsed_sec);
+
+    deleteLogger();
+    delete vm_;
+
+    // 重新加上 hook
+    _g_trace_data->hooktask = shadowhook_hook_func_addr(
+            (void*)(_g_trace_data->start + _g_trace_data->target),
+            (void*)(hook_and_trace_arg8),
+            (void**)&ori_arg8);
+
+    return qbdi_retval;
+}
+extern "C" size_t do_qbdi_trace1(size_t regs[31], size_t caller_sp)
 {
     size_t function_address = _g_trace_data->start + _g_trace_data->target;
     LOGE("start trace:%p", (void*)function_address);
@@ -208,7 +278,8 @@ extern "C" void* check_filter(size_t* regs, size_t caller_sp)
     size_t* stack_args = (size_t*)caller_sp;
     size_t arg9  = stack_args[0]; // 第 9 个参数
     size_t arg10 = stack_args[1]; // 第 10 个参数
-
+    //改参数
+   // stack_args[1] = 1;
     // ================= 编写你的过滤条件 =================
     // 例如：当 x0 == 1 时，不进行 trace，直接走原函数
     if (x0 == 1)

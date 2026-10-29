@@ -47,8 +47,22 @@ function inject () {
   dlopen(soPathPtr, 2);
 }
 
+function hookJava()
+{
+    Java.perform(function () {
+        var NativeLib = Java.use("com.mercadolibre.android.chinese_wall.chinese_wall.ChineseWallBridge$NativeLib");
+        NativeLib["getEncryptedData"].implementation = function (context, androidId, fsUUID, sensors, isDebugging, randomString, publicKey, difficulty, installerPackageName, buildModel, buildManufacturer, buildVersion, buildSdk) {
+            console.log(`NativeLib.getEncryptedData is called: context=${context}, androidId=${androidId}, fsUUID=${fsUUID}, sensors=${sensors}, isDebugging=${isDebugging}, randomString=${randomString}, publicKey=${publicKey}, difficulty=${difficulty}, installerPackageName=${installerPackageName}, buildModel=${buildModel}, buildManufacturer=${buildManufacturer}, buildVersion=${buildVersion}, buildSdk=${buildSdk}`);
+            let result = this["getEncryptedData"](context, androidId, fsUUID, sensors, isDebugging, randomString, publicKey, difficulty, installerPackageName, buildModel, buildManufacturer, buildVersion, buildSdk);
+            console.log(`NativeLib.getEncryptedData result=${result}`);
+            return result;
+        };
+    });
+}
+
 function attachInject () {
-  inject()
+  //inject()
+    hookJava()
 }
 
 setImmediate(hookLoadLibrary);
